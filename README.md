@@ -24,3 +24,10 @@ A continuous control task involving an underactuated pendulum that starts at a r
 - **Algorithms used**:
   - DDPG
   - PPO
+
+---
+
+## Declaration
+
+While some code in this repository was generated with the help of AI,
+all scripts have been tested and run successfully.
