@@ -15,6 +15,7 @@ A classic control problem where a pole is attached to a cart moving along a fric
   - A2C
   - DQN
   - REINFORCE with baseline
+  - PPO
 
 ### Pendulum-v1
 
