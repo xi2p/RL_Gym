@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
-import numpy as np
 import gymnasium as gym
 import matplotlib.pyplot as plt
+import tqdm
 
 # ==================== 超参数 ====================
 ENV_NAME = "Pendulum-v1"
@@ -19,25 +19,26 @@ CLIP_EPS = 0.2
 VF_COEF = 0.5
 ENT_COEF = 0.01
 LR = 3e-4
-MAX_ITER = 500
+MAX_ITER = 200
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==================== Actor（高斯策略）====================
 class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=64):
+    def __init__(self, state_dim, action_dim, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, action_dim)
         )
-        self.mean_layer = nn.Linear(hidden_dim, action_dim)
         self.log_std = nn.Parameter(torch.zeros(1, action_dim))
 
     def forward(self, state):
-        x = self.net(state)
-        mean = self.mean_layer(x)
+        mean = self.net(state)
         log_std = self.log_std.expand_as(mean)
         return mean, log_std
 
@@ -47,14 +48,16 @@ class Actor(nn.Module):
         return Normal(mean, std)
 
     def get_log_prob(self, dist, action):
-        return dist.log_prob(action).sum(dim=-1)
+        return dist.log_prob(action).sum(dim=-1).unsqueeze(1)
 
 # ==================== Critic ====================
 class Critic(nn.Module):
-    def __init__(self, state_dim, hidden_dim=64):
+    def __init__(self, state_dim, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
@@ -74,21 +77,19 @@ class PPOAgent:
             lr=LR
         )
 
-    def get_action_and_value(self, state, action=None):
+    def select_action(self, state):
         dist = self.actor.get_dist(state)
-        if action is None:
-            action = dist.sample()
+        action = dist.sample()
         log_prob = self.actor.get_log_prob(dist, action)
-        entropy = dist.entropy().sum(dim=-1)
         value = self.critic(state)
-        return action, log_prob, entropy, value
+        return action, log_prob, value
 
-    def evaluate_actions(self, state, action):
-        dist = self.actor.get_dist(state)
-        log_prob = self.actor.get_log_prob(dist, action)
-        entropy = dist.entropy().sum(dim=-1)
-        value = self.critic(state)
-        return log_prob, entropy, value
+    def evaluate_actions(self, states, actions):
+        dists = self.actor.get_dist(states)
+        log_prob = self.actor.get_log_prob(dists, actions)
+        entropy = dists.entropy().sum(dim=-1)
+        value = self.critic(states)
+        return log_prob, value, entropy
 
 # ==================== 纯Tensor缓冲区 ====================
 class RolloutBuffer:
@@ -105,8 +106,8 @@ class RolloutBuffer:
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
-        self.values.append(value.detach())        # Tensor [1,1] 或 [1]
-        self.log_probs.append(log_prob.detach())  # Tensor [1]
+        self.values.append(value.detach())        # Tensor [1,1]
+        self.log_probs.append(log_prob.detach())  # Tensor [1,1]
 
     def clear(self):
         self.states.clear()
@@ -117,12 +118,12 @@ class RolloutBuffer:
         self.log_probs.clear()
 
     def to_tensor(self, device):
-        states = torch.FloatTensor(np.array(self.states)).to(device)
-        actions = torch.FloatTensor(np.array(self.actions)).to(device)
-        rewards = torch.FloatTensor(np.array(self.rewards)).to(device)
-        dones = torch.FloatTensor(np.array(self.dones)).to(device)
-        values = torch.cat(self.values, dim=0).flatten()      # [T]
-        log_probs = torch.cat(self.log_probs, dim=0).flatten() # [T]
+        states = torch.cat(self.states, dim=0).to(device)
+        actions = torch.cat(self.actions, dim=0).to(device)
+        rewards = torch.FloatTensor(self.rewards).unsqueeze(1).to(device)
+        dones = torch.FloatTensor(self.dones).unsqueeze(1).to(device)
+        values = torch.cat(self.values, dim=0).to(device)
+        log_probs = torch.cat(self.log_probs, dim=0).to(device)
         return states, actions, rewards, dones, values, log_probs
 
 # ==================== 训练 ====================
@@ -136,54 +137,65 @@ def train():
 
     iteration_rewards = []
 
-    for iteration in range(1, MAX_ITER + 1):
+    for iteration in tqdm.trange(1, MAX_ITER + 1, desc="Training PPO"):
         state, _ = env.reset()
         episode_reward = 0
-        episode_count = 0
         buffer.clear()
 
+        # ---------- 与环境交互 收集轨迹 ----------
         for step in range(T):
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
-            with torch.no_grad():
-                action, log_prob, _, value = agent.get_action_and_value(state_tensor)
-                action = action.cpu().numpy().flatten()
-                log_prob = log_prob.cpu()          # 保持Tensor，转移到cpu以便存储？更好的做法：直接存储Tensor（已在GPU），稍后to_tensor时统一处理
-                value = value.cpu()               # 为了与state/action（numpy）统一存储，这里先转为cpu Tensor
-                # 注意：为了纯Tensor，我们也可以让state/action也保持Tensor，但为了简单，仍用numpy存储state/action
-            # 执行环境
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
 
-            buffer.push(state, action, reward, done, value, log_prob)
+            # select an action
+            with torch.no_grad():
+                action, log_prob, value = agent.select_action(state_tensor)
+
+            # act
+            next_state, reward, terminated, truncated, _ = env.step(action.cpu().numpy()[0])
+            done = terminated or truncated
+            # state_tensor: [1, state_dim],
+            # action:       [1, action_dim],
+            # reward:       scalar,
+            # done:         bool,
+            # value:        [1,1],
+            # log_prob:     [1,1]
+
+            buffer.push(state_tensor, action, reward, done, value, log_prob)
 
             state = next_state
             episode_reward += reward
             if done:
                 state, _ = env.reset()
-                episode_count += 1
                 iteration_rewards.append(episode_reward)
-                episode_reward = 0
 
-        # ---------- 全部转换为Tensor（已在device）----------
+        # ---------- 全部转换为Tensor----------
         states, actions, rewards, dones, values, old_log_probs = buffer.to_tensor(DEVICE)
+        # All the above are [T, ...] shape
+        # Specifically:
+        # states:        [T, state_dim]
+        # actions:       [T, action_dim]
+        # rewards:       [T, 1]
+        # dones:         [T, 1]
+        # values:        [T, 1]
+        # old_log_probs: [T, 1]
 
-        # 计算最后一个状态的价值（bootstrapping）
+        # 计算最后一个状态的价值
         with torch.no_grad():
-            last_state_tensor = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
-            last_value = agent.critic(last_state_tensor).flatten()  # [1]
+            last_state_tensor = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)    # [1, state_dim]
+            last_value = agent.critic(last_state_tensor)    # [1, 1]
 
         # 扩展values和dones以包含最后一步
-        values_ext = torch.cat([values, last_value])      # [T+1]
-        dones_ext = torch.cat([dones, torch.tensor([0.0], device=DEVICE)])  # [T+1]
+        values_ext = torch.cat([values, last_value], dim=0)   # [T+1, 1]
+        dones_ext = torch.cat([dones, torch.tensor([[0.0]], device=DEVICE)], dim=0)  # [T+1, 1]
 
-        # ---------- GAE (纯Tensor循环) ----------
-        advantages = torch.zeros(T, device=DEVICE)
-        gae = 0
-        for t in reversed(range(T)):
+        # ---------- GAE ----------
+        advantages = torch.zeros((T,1), device=DEVICE)
+        gae = 0.0
+        for t in reversed(range(len(values))):
             delta = rewards[t] + GAMMA * values_ext[t+1] * (1 - dones_ext[t]) - values_ext[t]
             gae = delta + GAMMA * LAMBDA * (1 - dones_ext[t]) * gae
             advantages[t] = gae
-        returns = advantages + values  # [T]
+        returns = advantages + values  # [T, 1]
 
         # ---------- 优化阶段 ----------
         total_loss = 0
@@ -196,14 +208,14 @@ def train():
 
                 mb_states = states[idx]
                 mb_actions = actions[idx]
-                mb_advantages = advantages[idx].unsqueeze(1)   # [batch,1]
-                mb_returns = returns[idx].unsqueeze(1)        # [batch,1]
-                mb_old_log_probs = old_log_probs[idx].unsqueeze(1)  # [batch,1]
+                mb_advantages = advantages[idx]   # [batch,1]
+                mb_returns = returns[idx]        # [batch,1]
+                mb_old_log_probs = old_log_probs[idx]  # [batch,1]
 
-                # 新策略的对数概率、熵、价值
-                new_log_probs, entropy, values_pred = agent.evaluate_actions(mb_states, mb_actions)
+                # 用现在的策略重新评估动作，主要是看log_prob的变化。
+                new_log_probs, values_pred, entropy = agent.evaluate_actions(mb_states, mb_actions)
 
-                ratio = torch.exp(new_log_probs.unsqueeze(1) - mb_old_log_probs)  # [batch,1]
+                ratio = torch.exp(new_log_probs - mb_old_log_probs)  # [batch,1]
 
                 # clipped surrogate
                 surr1 = ratio * mb_advantages
@@ -225,11 +237,10 @@ def train():
                 total_loss += loss.item()
 
         # 日志
-        avg_ep_reward = np.mean(iteration_rewards[-max(1, episode_count):]) if episode_count > 0 else 0
-        if iteration % 20 == 0:
-            print(f"Iter {iteration:3d} | Steps: {iteration * T * N_ENVS:6d} | "
-                  f"AvgEpRet: {avg_ep_reward:6.2f} | "
-                  f"Loss: {total_loss / (EPOCHS * (T // MINIBATCH_SIZE)):.3f}")
+        if iteration % 5 == 0:
+            print(f"\nIter {iteration:3d} | Steps: {iteration * T * N_ENVS:6d} | "
+                  f"Loss: {total_loss / (EPOCHS * (T // MINIBATCH_SIZE)):.3f} | "
+                  f"Ep Reward: {iteration_rewards[-1]:.2f}")
 
     env.close()
     return iteration_rewards
@@ -241,4 +252,5 @@ if __name__ == "__main__":
     plt.ylabel("Return")
     plt.title("PPO on Pendulum-v1 (Pure Torch)")
     plt.grid()
+    plt.savefig('ppo_pendulum.png')
     plt.show()
