@@ -250,7 +250,7 @@ if __name__ == "__main__":
     plt.plot(rewards)
     plt.xlabel("Episode")
     plt.ylabel("Return")
-    plt.title("PPO on Pendulum-v1 (Pure Torch)")
+    plt.title("PPO on Pendulum-v1")
     plt.grid()
     plt.savefig('ppo_pendulum.png')
     plt.show()
