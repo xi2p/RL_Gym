@@ -25,6 +25,15 @@ A continuous control task involving an underactuated pendulum that starts at a r
 - **Algorithms used**:
   - DDPG
   - PPO
+  - TD3
+
+### LunarLanderContinuous-v3
+
+A rocket trajectory optimization problem where the agent must safely land a spacecraft between two flagpoles on the moon's surface .
+
+- **Action space**: Continuous  
+- **Algorithms used**:
+  - TD3
 
 ---
 
