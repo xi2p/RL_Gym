@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 
 # ==================== 超参数 ====================
 ENV_NAME = "Pendulum-v1"
-ENV_NAME = "LunarLanderContinuous-v3"
 MAX_EPISODES = 200
 MAX_STEPS = 1000
 GAMMA = 0.99
