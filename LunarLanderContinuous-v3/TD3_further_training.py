@@ -19,9 +19,9 @@ LR_ACTOR = 3e-4
 LR_CRITIC = 3e-4
 BUFFER_SIZE = 10000
 BATCH_SIZE = 100
-EXPLORATION_NOISE = 0.2  # 噪声标准差
-SMOOTHING_NOISE = 0.1
-SMOOTHING_NOISE_MAX = 0.5
+EXPLORATION_NOISE = 0.1  # 噪声标准差
+SMOOTHING_NOISE = 0.05
+SMOOTHING_NOISE_MAX = 0.2
 POLICY_UPDATE_FREQUENCY = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -31,9 +31,11 @@ class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim, 400),
+            nn.Linear(state_dim, 512),
             nn.ReLU(),
-            nn.Linear(400, 300),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 300),
             nn.ReLU(),
             nn.Linear(300, action_dim),
             nn.Tanh()  # 输出范围 [-1, 1]
@@ -49,9 +51,11 @@ class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 400),
+            nn.Linear(state_dim + action_dim, 512),
             nn.ReLU(),
-            nn.Linear(400, 300),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 300),
             nn.ReLU(),
             nn.Linear(300, 1)
         )
@@ -137,7 +141,7 @@ class TD3Agent:
         # ----- 1. 更新 Critic -----
         # 给action附上噪声
         with torch.no_grad():
-            noise = torch.randn(actions.shape) * SMOOTHING_NOISE
+            noise = torch.randn(actions.shape).to(DEVICE) * SMOOTHING_NOISE
             noise = torch.clip(noise, -SMOOTHING_NOISE_MAX, SMOOTHING_NOISE_MAX)
             next_actions = (self.target_actor(next_states) + noise).clamp(-self.max_action, self.max_action)
             y_targets = rewards + GAMMA * (1-dones) * torch.min(self.target_critic_1(next_states, next_actions), self.target_critic_2(next_states, next_actions))
